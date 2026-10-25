@@ -25,6 +25,7 @@
   let deferredInstall = null;
   let toastTimer = null;
   let remindersChecking = false;
+  let reminderAudioContext = null;
   let editingTaskId = null;
 
   $('#welcomeDate').textContent = new Intl.DateTimeFormat(undefined, {
@@ -131,12 +132,13 @@
   }
 
   function readReminderSettings() {
-    const defaults = { remindersEnabled: false, quietHoursEnabled: false, quietStart: '22:00', quietEnd: '07:00' };
+    const defaults = { remindersEnabled: false, soundEnabled: true, quietHoursEnabled: false, quietStart: '22:00', quietEnd: '07:00' };
     try {
       const saved = JSON.parse(localStorage.getItem(reminderSettingsStorageKey) || '{}');
       const validTime = (value) => typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
       return {
         remindersEnabled: saved.remindersEnabled === true,
+        soundEnabled: saved.soundEnabled !== false,
         quietHoursEnabled: saved.quietHoursEnabled === true,
         quietStart: validTime(saved.quietStart) ? saved.quietStart : defaults.quietStart,
         quietEnd: validTime(saved.quietEnd) ? saved.quietEnd : defaults.quietEnd
@@ -182,11 +184,43 @@
     return start < end ? current >= start && current < end : current >= start || current < end;
   }
 
+  function unlockReminderAudio() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return Promise.resolve(false);
+    try {
+      reminderAudioContext ||= new AudioContextClass();
+      return reminderAudioContext.state === 'suspended'
+        ? reminderAudioContext.resume().then(() => true).catch(() => false)
+        : Promise.resolve(reminderAudioContext.state === 'running');
+    } catch { return Promise.resolve(false); }
+  }
+
+  function playReminderChime(force = false) {
+    const context = reminderAudioContext;
+    if ((!reminderSettings.soundEnabled && !force) || document.hidden || !context || context.state !== 'running') return;
+    const startAt = context.currentTime;
+    [660, 880].forEach((frequency, index) => {
+      const start = startAt + index * 0.17;
+      const oscillator = context.createOscillator();
+      const volume = context.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(frequency, start);
+      volume.gain.setValueAtTime(0.0001, start);
+      volume.gain.exponentialRampToValueAtTime(0.16, start + 0.025);
+      volume.gain.exponentialRampToValueAtTime(0.0001, start + 0.15);
+      oscillator.connect(volume);
+      volume.connect(context.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.16);
+    });
+  }
+
   function updateReminderSettingsUI() {
     const supported = 'Notification' in window && 'serviceWorker' in navigator;
     const permission = supported ? Notification.permission : 'unsupported';
     $('#remindersToggle').disabled = !supported;
     $('#remindersToggle').checked = reminderSettings.remindersEnabled && permission === 'granted';
+    $('#soundToggle').checked = reminderSettings.soundEnabled;
     $('#quietHoursToggle').checked = reminderSettings.quietHoursEnabled;
     $('#quietStart').value = reminderSettings.quietStart;
     $('#quietEnd').value = reminderSettings.quietEnd;
@@ -195,7 +229,7 @@
     if (!supported) status = 'Notifications are not supported in this browser.';
     else if (permission === 'denied') status = 'Notifications are blocked in browser settings. Allow them there to turn reminders on.';
     else if (reminderSettings.remindersEnabled && permission === 'granted') {
-      status = 'On. Dayflow checks for reminders while it is open; Android may pause it in the background.';
+      status = 'On. Dayflow checks while open. Android may pause it in the background; phone settings control notification sound.';
     }
     $('#remindersStatus').textContent = status;
   }
@@ -245,6 +279,7 @@
           continue;
         }
         await showTaskReminder(task);
+        if (!document.hidden) playReminderChime();
         sentReminders.add(key);
         saveSentReminders();
       }
@@ -616,6 +651,7 @@
   }
 
   function openSettings() {
+    unlockReminderAudio();
     $('#sheetTitle').textContent = 'Reminders and quiet hours';
     $('#taskForm').hidden = true;
     $('#presetManager').hidden = true;
@@ -626,6 +662,7 @@
   }
 
   async function setRemindersEnabled(enabled) {
+    if (enabled) unlockReminderAudio();
     if (!enabled) {
       reminderSettings.remindersEnabled = false;
       saveReminderSettings();
@@ -662,6 +699,21 @@
     reminderSettings.quietEnd = $('#quietEnd').value || '07:00';
     saveReminderSettings();
     $('#quietHoursFields').hidden = !reminderSettings.quietHoursEnabled;
+  }
+
+  function saveSoundSetting() {
+    reminderSettings.soundEnabled = $('#soundToggle').checked;
+    saveReminderSettings();
+    if (reminderSettings.soundEnabled) unlockReminderAudio();
+  }
+
+  async function testReminderChime() {
+    const unlocked = await unlockReminderAudio();
+    if (!unlocked) {
+      showToast('This browser could not start audio. Check your phone volume and try again.');
+      return;
+    }
+    playReminderChime(true);
   }
 
   function toggleTask(id, occurrenceDate = todayKey) {
@@ -814,6 +866,10 @@
   });
   $('#savePresets').addEventListener('click', () => closePresetEditor(true));
   $('#remindersToggle').addEventListener('change', (event) => setRemindersEnabled(event.currentTarget.checked));
+  $('#soundToggle').addEventListener('change', saveSoundSetting);
+  $('#testSoundButton').addEventListener('click', testReminderChime);
+  document.addEventListener('pointerdown', () => { unlockReminderAudio(); }, { once: true, passive: true });
+  document.addEventListener('keydown', () => { unlockReminderAudio(); }, { once: true });
   $('#quietHoursToggle').addEventListener('change', saveQuietHoursFromControls);
   $('#quietStart').addEventListener('change', saveQuietHoursFromControls);
   $('#quietEnd').addEventListener('change', saveQuietHoursFromControls);
