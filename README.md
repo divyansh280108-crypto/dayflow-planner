@@ -5,6 +5,8 @@ A phone-first daily planner prototype for Android. Dayflow combines flexible tas
 ## Included
 
 - Add tasks for today or a future date
+- Edit a task's title, date, or time without recreating it
+- Set a task to repeat weekly on any combination of days, with separate completion and reminder tracking for each occurrence
 - Leave a task flexible or give it a time
 - Start from editable shortcuts for focus time, breaks, lunch, movement, and planning
 - Rename, retime, add, or remove shortcuts

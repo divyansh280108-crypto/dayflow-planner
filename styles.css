@@ -30,3 +30,18 @@
 .quiet-hours-fields label{flex:1;color:#67766d;font-size:10px;font-weight:700}
 .quiet-hours-fields input{width:100%;height:38px;margin-top:6px;padding:0 10px;border:1px solid #e3e9e3;border-radius:10px;background:#fff;color:var(--ink);font:inherit}
 .settings-toggle input:focus-visible,.quiet-hours-fields input:focus-visible{outline:3px solid rgba(47,118,95,.25);outline-offset:2px}
+
+.task-actions{display:flex;align-items:center;gap:4px;margin-left:auto;flex:0 0 auto}
+.edit-task{border:0;border-radius:8px;background:#f2f7f1;color:var(--green-dark);padding:6px 8px;font-size:10px;font-weight:700;cursor:pointer}
+.edit-task:hover{background:#e7f0e6}
+.repeat-label{color:#62816c;font-size:9px;font-weight:700}
+.repeat-picker{min-width:0;margin:17px 0 12px;padding:0;border:0}
+.repeat-picker legend{padding:0}
+.repeat-day-options{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.repeat-day{position:relative;cursor:pointer}
+.repeat-day input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+.repeat-day span{min-height:38px;display:grid;place-items:center;border:1px solid #e3e9e3;border-radius:11px;background:#fbfcfa;color:#6e7b73;font-size:10px;font-weight:700;transition:background .15s,color .15s,border-color .15s}
+.repeat-day input:checked+span{border-color:var(--green);background:var(--green);color:#fff}
+.repeat-day input:focus-visible+span{outline:3px solid rgba(47,118,95,.25);outline-offset:2px}
+.repeat-help{margin:8px 0 0;color:#829087;font-size:10px;line-height:1.45}
+@media(max-width:520px){.task-actions{gap:2px}.edit-task{padding:7px 6px}.repeat-day-options{gap:4px}.repeat-day span{min-height:36px;font-size:9px}}

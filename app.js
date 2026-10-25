@@ -25,6 +25,7 @@
   let deferredInstall = null;
   let toastTimer = null;
   let remindersChecking = false;
+  let editingTaskId = null;
 
   $('#welcomeDate').textContent = new Intl.DateTimeFormat(undefined, {
     weekday: 'long', month: 'long', day: 'numeric'
@@ -40,18 +41,77 @@
     return local.toISOString().slice(0, 10);
   }
 
+  const repeatDayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  function normalizeRepeatDays(days) {
+    if (!Array.isArray(days)) return [];
+    return [...new Set(days.map(Number).filter((day) =>
+      Number.isInteger(day) && day >= 0 && day <= 6
+    ))].sort((a, b) => (a === 0 ? 7 : a) - (b === 0 ? 7 : b));
+  }
+
+  function dateFromKey(dateKey) {
+    const [year, month, day] = dateKey.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  }
+
+  function addDaysToKey(dateKey, amount) {
+    const date = dateFromKey(dateKey);
+    date.setDate(date.getDate() + amount);
+    return toDateKey(date);
+  }
+
   function readTasks() {
     try {
       const saved = JSON.parse(localStorage.getItem(taskStorageKey) || '[]');
       return Array.isArray(saved) ? saved.filter((task) =>
         task && typeof task.id === 'string' && typeof task.title === 'string' &&
         typeof task.date === 'string'
-      ) : [];
+      ).map((task) => ({
+        ...task,
+        repeatDays: normalizeRepeatDays(task.repeatDays),
+        completedDates: Array.isArray(task.completedDates)
+          ? task.completedDates.filter((date) => typeof date === 'string') : [],
+        completedAtByDate: task.completedAtByDate && typeof task.completedAtByDate === 'object'
+          ? task.completedAtByDate : {}
+      })) : [];
     } catch {
       return [];
     }
   }
 
+  function occurrenceOn(task, dateKey) {
+    const repeatDays = normalizeRepeatDays(task.repeatDays);
+    if (repeatDays.length) {
+      if (dateKey < task.date || !repeatDays.includes(dateFromKey(dateKey).getDay())) return null;
+      const completed = task.completedDates.includes(dateKey);
+      return {
+        ...task,
+        date: dateKey,
+        occurrenceDate: dateKey,
+        isRecurring: true,
+        completed,
+        completedAt: task.completedAtByDate[dateKey] || (completed ? dateKey + 'T00:00:00' : null)
+      };
+    }
+    if (task.date !== dateKey) return null;
+    return { ...task, occurrenceDate: dateKey, isRecurring: false };
+  }
+
+  function occurrencesOn(dateKey) {
+    return tasks.map((task) => occurrenceOn(task, dateKey)).filter(Boolean);
+  }
+
+  function firstRepeatDateOnOrAfter(startDate, repeatDays) {
+    const days = normalizeRepeatDays(repeatDays);
+    if (!days.length) return null;
+    const firstDate = startDate < todayKey ? todayKey : startDate;
+    for (let offset = 0; offset < 7; offset += 1) {
+      const dateKey = addDaysToKey(firstDate, offset);
+      if (days.includes(dateFromKey(dateKey).getDay())) return dateKey;
+    }
+    return null;
+  }
   function readPresets() {
     try {
       const saved = localStorage.getItem(presetStorageKey);
@@ -146,7 +206,7 @@
       body: 'Scheduled for ' + formatTime(task.time) + '.',
       icon: './icons/dayflow-192.png',
       badge: './icons/dayflow-192.png',
-      tag: 'dayflow-task-' + task.id,
+      tag: 'dayflow-task-' + task.id + '-' + task.date,
       data: { url: './' }
     };
     try {
@@ -171,7 +231,7 @@
     remindersChecking = true;
     try {
       const now = new Date();
-      for (const task of tasks) {
+      for (const task of occurrencesOn(toDateKey(now))) {
         if (task.completed || !task.time) continue;
         const key = reminderKey(task);
         if (sentReminders.has(key)) continue;
@@ -190,7 +250,6 @@
       }
     } finally { remindersChecking = false; }
   }
-
   function makeId() {
     return typeof crypto !== 'undefined' && crypto.randomUUID
       ? crypto.randomUUID()
@@ -218,15 +277,49 @@
   }
 
   function visibleTasks() {
-    if (currentView === 'upcoming') return tasks.filter((task) => task.date > todayKey && !task.completed);
-    if (currentView === 'done') {
-      return tasks.filter((task) => task.completed).sort((a, b) =>
-        (b.completedAt || '').localeCompare(a.completedAt || '')
-      );
-    }
-    return tasks.filter((task) => task.date === todayKey);
-  }
+    if (currentView === 'today') return occurrencesOn(todayKey);
 
+    if (currentView === 'upcoming') {
+      const horizon = addDaysToKey(todayKey, 14);
+      const upcoming = [];
+      tasks.forEach((task) => {
+        const repeatDays = normalizeRepeatDays(task.repeatDays);
+        if (!repeatDays.length) {
+          if (task.date > todayKey && !task.completed) {
+            upcoming.push({ ...task, occurrenceDate: task.date, isRecurring: false });
+          }
+          return;
+        }
+        for (let offset = 1; offset <= 14; offset += 1) {
+          const occurrence = occurrenceOn(task, addDaysToKey(todayKey, offset));
+          if (occurrence && !occurrence.completed) upcoming.push(occurrence);
+        }
+        if (task.date > horizon) {
+          const firstDate = firstRepeatDateOnOrAfter(task.date, repeatDays);
+          if (firstDate && firstDate > horizon) {
+            const occurrence = occurrenceOn(task, firstDate);
+            if (occurrence && !occurrence.completed) upcoming.push(occurrence);
+          }
+        }
+      });
+      return upcoming;
+    }
+
+    const earliest = addDaysToKey(todayKey, -60);
+    const completed = [];
+    tasks.forEach((task) => {
+      const repeatDays = normalizeRepeatDays(task.repeatDays);
+      if (!repeatDays.length) {
+        if (task.completed) completed.push({ ...task, occurrenceDate: task.date, isRecurring: false });
+        return;
+      }
+      task.completedDates.filter((date) => date <= todayKey && date >= earliest).forEach((date) => {
+        const occurrence = occurrenceOn(task, date);
+        if (occurrence) completed.push(occurrence);
+      });
+    });
+    return completed;
+  }
   function createTaskCard(task, upcoming = false) {
     const card = document.createElement('article');
     card.className = 'task-card' + (task.completed ? ' completed' : '');
@@ -237,7 +330,7 @@
     check.setAttribute('aria-label', (task.completed ? 'Mark ' : 'Complete ') + task.title);
     check.setAttribute('aria-pressed', String(task.completed));
     check.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.2 3 3 6-6.4"/></svg>';
-    check.addEventListener('click', () => toggleTask(task.id));
+    check.addEventListener('click', () => toggleTask(task.id, task.occurrenceDate || task.date));
 
     const content = document.createElement('div');
     content.className = 'task-content';
@@ -257,27 +350,43 @@
       flexible.textContent = 'Whenever it fits';
       meta.append(flexible);
     }
+    if (task.isRecurring) {
+      const repeat = document.createElement('span');
+      repeat.className = 'repeat-label';
+      repeat.textContent = 'Weekly · ' + normalizeRepeatDays(task.repeatDays).map((day) => repeatDayNames[day]).join(', ');
+      meta.append(repeat);
+    }
 
     content.append(title, meta);
     card.append(check, content);
 
-    if (upcoming) {
+    if (upcoming || currentView === 'done') {
       const date = document.createElement('span');
       date.className = 'task-date-badge';
       date.textContent = formatDate(task.date);
       card.append(date);
     }
 
+    const actions = document.createElement('div');
+    actions.className = 'task-actions';
+    const edit = document.createElement('button');
+    edit.className = 'edit-task';
+    edit.type = 'button';
+    edit.textContent = 'Edit';
+    edit.setAttribute('aria-label', 'Edit task ' + task.title + (task.isRecurring ? ' and its weekly schedule' : ''));
+    edit.addEventListener('click', () => openEditTask(task.id));
+
     const remove = document.createElement('button');
     remove.className = 'delete-task';
     remove.type = 'button';
-    remove.setAttribute('aria-label', 'Delete ' + task.title);
+    remove.setAttribute('aria-label', task.isRecurring ? 'Delete weekly task ' + task.title : 'Delete ' + task.title);
     remove.textContent = '×';
     remove.addEventListener('click', () => deleteTask(task.id));
-    card.append(remove);
+
+    actions.append(edit, remove);
+    card.append(actions);
     return card;
   }
-
   function appendGroup(label, cards) {
     const group = document.createElement('div');
     group.className = 'time-group';
@@ -298,7 +407,7 @@
     const taskList = $('#taskList');
     taskList.replaceChildren();
 
-    const todays = tasks.filter((task) => task.date === todayKey);
+    const todays = occurrencesOn(todayKey);
     const doneCount = todays.filter((task) => task.completed).length;
     const remaining = todays.length - doneCount;
     const percent = todays.length ? Math.round(doneCount / todays.length * 100) : 0;
@@ -555,19 +664,42 @@
     $('#quietHoursFields').hidden = !reminderSettings.quietHoursEnabled;
   }
 
-  function toggleTask(id) {
-    tasks = tasks.map((task) => task.id === id ? {
-      ...task,
-      completed: !task.completed,
-      completedAt: !task.completed ? new Date().toISOString() : null
-    } : task);
+  function toggleTask(id, occurrenceDate = todayKey) {
+    const now = new Date();
+    let didComplete = false;
+    tasks = tasks.map((task) => {
+      if (task.id !== id) return task;
+      if (normalizeRepeatDays(task.repeatDays).length) {
+        const completedDates = new Set(task.completedDates || []);
+        didComplete = !completedDates.has(occurrenceDate);
+        const completedAtByDate = { ...(task.completedAtByDate || {}) };
+        if (didComplete) {
+          completedDates.add(occurrenceDate);
+          completedAtByDate[occurrenceDate] = now.toISOString();
+        } else {
+          completedDates.delete(occurrenceDate);
+          delete completedAtByDate[occurrenceDate];
+        }
+        return {
+          ...task,
+          completed: false,
+          completedAt: null,
+          completedDates: [...completedDates],
+          completedAtByDate
+        };
+      }
+      didComplete = !task.completed;
+      return {
+        ...task,
+        completed: didComplete,
+        completedAt: didComplete ? now.toISOString() : null
+      };
+    });
     saveTasks();
     render();
     if (navigator.vibrate) navigator.vibrate(12);
-    const changed = tasks.find((task) => task.id === id);
-    if (changed && changed.completed) showToast('One thing at a time. Nicely done.');
+    if (didComplete) showToast('One thing at a time. Nicely done.');
   }
-
   function deleteTask(id) {
     tasks = tasks.filter((task) => task.id !== id);
     saveTasks();
@@ -603,9 +735,51 @@
     return toDateKey(date);
   }
 
+  function updateRepeatUI() {
+    const selected = [...document.querySelectorAll('input[name="repeatDays"]:checked')]
+      .map((input) => Number(input.value))
+      .sort((a, b) => (a === 0 ? 7 : a) - (b === 0 ? 7 : b));
+    $('#taskDateLabel').textContent = selected.length ? 'Starts on' : 'Day';
+    $('#repeatHelp').textContent = selected.length
+      ? 'Repeats weekly on ' + selected.map((day) => repeatDayNames[day]).join(', ') + '.'
+      : 'Leave days clear for a one-time task.';
+  }
+
+  function openEditTask(id) {
+    const task = tasks.find((item) => item.id === id);
+    if (!task) return;
+    editingTaskId = id;
+    $('#taskForm').reset();
+    $('#sheetTitle').textContent = 'Edit your task';
+    $('#taskSubmitLabel').textContent = 'Save changes';
+    $('#taskTitle').value = task.title;
+    $('#taskDate').value = task.date;
+    $('#taskDate').removeAttribute('min');
+    $('#taskTime').value = task.time || '';
+    const repeatDays = normalizeRepeatDays(task.repeatDays);
+    document.querySelectorAll('input[name="repeatDays"]').forEach((input) => {
+      input.checked = repeatDays.includes(Number(input.value));
+    });
+    updateRepeatUI();
+    if (repeatDays.length) {
+      $('#repeatHelp').textContent += ' Changes apply to all future repeats.';
+    }
+    $('#taskForm').hidden = false;
+    $('#presetManager').hidden = true;
+    $('#settingsPanel').hidden = true;
+    $('#sheetBackdrop').hidden = false;
+    $('#taskSheet').hidden = false;
+    setTimeout(() => $('#taskTitle').focus(), 40);
+  }
+
   function openSheet() {
+    editingTaskId = null;
+    $('#taskForm').reset();
     $('#taskDate').value = currentView === 'upcoming' ? nextDateKey() : todayKey;
+    $('#taskDate').min = todayKey;
     $('#sheetTitle').textContent = 'Add something to your day';
+    $('#taskSubmitLabel').textContent = 'Add to my plan';
+    updateRepeatUI();
     $('#taskForm').hidden = false;
     $('#presetManager').hidden = true;
     $('#settingsPanel').hidden = true;
@@ -622,9 +796,12 @@
     $('#settingsPanel').hidden = true;
     $('#sheetTitle').textContent = 'Add something to your day';
     $('#taskForm').reset();
+    $('#taskSubmitLabel').textContent = 'Add to my plan';
+    $('#taskDate').min = todayKey;
     $('#taskDate').value = todayKey;
+    editingTaskId = null;
+    updateRepeatUI();
   }
-
   $('#addButton').addEventListener('click', openSheet);
   $('#closeSheet').addEventListener('click', closeSheet);
   $('#sheetBackdrop').addEventListener('click', closeSheet);
@@ -640,6 +817,7 @@
   $('#quietHoursToggle').addEventListener('change', saveQuietHoursFromControls);
   $('#quietStart').addEventListener('change', saveQuietHoursFromControls);
   $('#quietEnd').addEventListener('change', saveQuietHoursFromControls);
+  document.querySelectorAll('input[name="repeatDays"]').forEach((input) => input.addEventListener('change', updateRepeatUI));
 
   $('#taskForm').addEventListener('submit', (event) => {
     event.preventDefault();
@@ -647,18 +825,70 @@
     const title = String(data.get('title') || '').trim();
     if (!title) return;
 
-    const date = String(data.get('date'));
-    tasks.push({
-      id: makeId(),
-      title,
-      date,
-      time: String(data.get('time') || ''),
-      completed: false,
-      createdAt: new Date().toISOString()
-    });
+    const date = String(data.get('date') || '');
+    const time = String(data.get('time') || '');
+    const repeatDays = normalizeRepeatDays(data.getAll('repeatDays'));
+    const isEditing = Boolean(editingTaskId);
+    const editedId = editingTaskId;
+    if (isEditing) {
+      const existing = tasks.find((task) => task.id === editedId);
+      if (!existing) return;
+      tasks = tasks.map((task) => {
+        if (task.id !== editedId) return task;
+        const oldRepeatDays = normalizeRepeatDays(task.repeatDays);
+        const completedDates = new Set(task.completedDates || []);
+        if (task.completed && task.date) completedDates.add(task.date);
+        if (repeatDays.length) {
+          return {
+            ...task,
+            title,
+            date,
+            time,
+            repeatDays,
+            completed: false,
+            completedAt: null,
+            completedDates: [...completedDates],
+            completedAtByDate: task.completedAtByDate || {}
+          };
+        }
+        const wasCompleted = oldRepeatDays.length
+          ? completedDates.has(date)
+          : task.completed && task.date === date;
+        return {
+          ...task,
+          title,
+          date,
+          time,
+          repeatDays: [],
+          completed: wasCompleted,
+          completedAt: wasCompleted ? task.completedAt || task.completedAtByDate?.[date] || null : null,
+          completedDates: [...completedDates],
+          completedAtByDate: task.completedAtByDate || {}
+        };
+      });
+    } else {
+      tasks.push({
+        id: makeId(),
+        title,
+        date,
+        time,
+        repeatDays,
+        completed: false,
+        completedDates: [],
+        completedAtByDate: {},
+        createdAt: new Date().toISOString()
+      });
+    }
+
     saveTasks();
     closeSheet();
-    currentView = date > todayKey ? 'upcoming' : 'today';
+    if (repeatDays.length) {
+      const firstOccurrence = firstRepeatDateOnOrAfter(date, repeatDays);
+      currentView = firstOccurrence === todayKey ? 'today' : 'upcoming';
+    } else if (date > todayKey) currentView = 'upcoming';
+    else if (date < todayKey && tasks.find((task) => task.id === editedId)?.completed) currentView = 'done';
+    else currentView = 'today';
+
     document.querySelectorAll('.view-tab').forEach((button) => {
       const active = button.dataset.view === currentView;
       button.classList.toggle('active', active);
@@ -668,9 +898,8 @@
       button.classList.toggle('selected', button.dataset.view === currentView)
     );
     render();
-    showToast('Added. Your plan is taking shape.');
+    showToast(isEditing ? 'Your changes are saved.' : 'Added. Your plan is taking shape.');
   });
-
   document.querySelectorAll('[data-view]').forEach((button) =>
     button.addEventListener('click', () => setView(button.dataset.view))
   );
