@@ -4,6 +4,9 @@
   const todayKey = toDateKey(today);
   const taskStorageKey = 'dayflow.tasks.v1';
   const presetStorageKey = 'dayflow.presets.v1';
+  const reminderSettingsStorageKey = 'dayflow.reminder-settings.v1';
+  const reminderHistoryStorageKey = 'dayflow.reminders.sent.v1';
+  const reminderDeliveryGraceMs = 5 * 60 * 1000;
   const defaultPresets = [
     { id: 'focus', title: 'Focus block', time: '09:00' },
     { id: 'break', title: 'Take a break', time: '11:00' },
@@ -16,9 +19,12 @@
   let sortByTime = true;
   let tasks = readTasks();
   let presets = readPresets();
+  let reminderSettings = readReminderSettings();
+  let sentReminders = readSentReminders();
   let presetDraft = [];
   let deferredInstall = null;
   let toastTimer = null;
+  let remindersChecking = false;
 
   $('#welcomeDate').textContent = new Intl.DateTimeFormat(undefined, {
     weekday: 'long', month: 'long', day: 'numeric'
@@ -62,6 +68,127 @@
     } catch {
       return defaultPresets.map((preset) => ({ ...preset }));
     }
+  }
+
+  function readReminderSettings() {
+    const defaults = { remindersEnabled: false, quietHoursEnabled: false, quietStart: '22:00', quietEnd: '07:00' };
+    try {
+      const saved = JSON.parse(localStorage.getItem(reminderSettingsStorageKey) || '{}');
+      const validTime = (value) => typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+      return {
+        remindersEnabled: saved.remindersEnabled === true,
+        quietHoursEnabled: saved.quietHoursEnabled === true,
+        quietStart: validTime(saved.quietStart) ? saved.quietStart : defaults.quietStart,
+        quietEnd: validTime(saved.quietEnd) ? saved.quietEnd : defaults.quietEnd
+      };
+    } catch { return defaults; }
+  }
+
+  function readSentReminders() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(reminderHistoryStorageKey) || '[]');
+      return new Set(Array.isArray(saved) ? saved.filter((key) => typeof key === 'string') : []);
+    } catch { return new Set(); }
+  }
+
+  function saveReminderSettings() {
+    try { localStorage.setItem(reminderSettingsStorageKey, JSON.stringify(reminderSettings)); }
+    catch { showToast('Could not save notification settings on this device.'); }
+  }
+
+  function saveSentReminders() {
+    try { localStorage.setItem(reminderHistoryStorageKey, JSON.stringify([...sentReminders].slice(-500))); }
+    catch { /* Keep the in-memory history for this session. */ }
+  }
+
+  function reminderKey(task) { return task.id + ':' + task.date + ':' + task.time; }
+
+  function localTaskTime(task) {
+    if (!task.date || !task.time) return NaN;
+    const [year, month, day] = task.date.split('-').map(Number);
+    const [hour, minute] = task.time.split(':').map(Number);
+    if (![year, month, day, hour, minute].every(Number.isFinite)) return NaN;
+    return new Date(year, month - 1, day, hour, minute, 0, 0).getTime();
+  }
+
+  function isQuietHours(now) {
+    if (!reminderSettings.quietHoursEnabled) return false;
+    const [sh, sm] = reminderSettings.quietStart.split(':').map(Number);
+    const [eh, em] = reminderSettings.quietEnd.split(':').map(Number);
+    const start = sh * 60 + sm;
+    const end = eh * 60 + em;
+    if (start === end) return false;
+    const current = now.getHours() * 60 + now.getMinutes();
+    return start < end ? current >= start && current < end : current >= start || current < end;
+  }
+
+  function updateReminderSettingsUI() {
+    const supported = 'Notification' in window && 'serviceWorker' in navigator;
+    const permission = supported ? Notification.permission : 'unsupported';
+    $('#remindersToggle').disabled = !supported;
+    $('#remindersToggle').checked = reminderSettings.remindersEnabled && permission === 'granted';
+    $('#quietHoursToggle').checked = reminderSettings.quietHoursEnabled;
+    $('#quietStart').value = reminderSettings.quietStart;
+    $('#quietEnd').value = reminderSettings.quietEnd;
+    $('#quietHoursFields').hidden = !reminderSettings.quietHoursEnabled;
+    let status = 'Off. Turn this on to request permission and receive notifications at timed tasks.';
+    if (!supported) status = 'Notifications are not supported in this browser.';
+    else if (permission === 'denied') status = 'Notifications are blocked in browser settings. Allow them there to turn reminders on.';
+    else if (reminderSettings.remindersEnabled && permission === 'granted') {
+      status = 'On. Dayflow checks for reminders while it is open; Android may pause it in the background.';
+    }
+    $('#remindersStatus').textContent = status;
+  }
+
+  async function showTaskReminder(task) {
+    const title = 'Time for ' + task.title;
+    const options = {
+      body: 'Scheduled for ' + formatTime(task.time) + '.',
+      icon: './icons/dayflow-192.png',
+      badge: './icons/dayflow-192.png',
+      tag: 'dayflow-task-' + task.id,
+      data: { url: './' }
+    };
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      if (typeof registration.showNotification === 'function') {
+        await registration.showNotification(title, options);
+        return true;
+      }
+    } catch { /* Fall back to a page notification if the worker is unavailable. */ }
+    try {
+      new Notification(title, options);
+      return true;
+    } catch {
+      showToast('Could not show a reminder. Check notification permission.');
+      return false;
+    }
+  }
+
+  async function checkTaskReminders() {
+    if (remindersChecking || !reminderSettings.remindersEnabled ||
+        !('Notification' in window) || Notification.permission !== 'granted') return;
+    remindersChecking = true;
+    try {
+      const now = new Date();
+      for (const task of tasks) {
+        if (task.completed || !task.time) continue;
+        const key = reminderKey(task);
+        if (sentReminders.has(key)) continue;
+        const dueAt = localTaskTime(task);
+        if (!Number.isFinite(dueAt)) continue;
+        const lateness = now.getTime() - dueAt;
+        if (lateness < 0) continue;
+        if (lateness > reminderDeliveryGraceMs || isQuietHours(new Date(dueAt)) || isQuietHours(now)) {
+          sentReminders.add(key);
+          saveSentReminders();
+          continue;
+        }
+        await showTaskReminder(task);
+        sentReminders.add(key);
+        saveSentReminders();
+      }
+    } finally { remindersChecking = false; }
   }
 
   function makeId() {
@@ -347,7 +474,9 @@
   function openPresetEditor() {
     presetDraft = presets.map((preset) => ({ ...preset }));
     renderPresetEditor();
+    $('#sheetTitle').textContent = 'Add something to your day';
     $('#taskForm').hidden = true;
+    $('#settingsPanel').hidden = true;
     $('#presetManager').hidden = false;
   }
 
@@ -371,8 +500,59 @@
       showToast('Your shortcuts are updated.');
     }
     $('#presetManager').hidden = true;
+    $('#settingsPanel').hidden = true;
+    $('#sheetTitle').textContent = 'Add something to your day';
     $('#taskForm').hidden = false;
     $('#taskTitle').focus();
+  }
+
+  function openSettings() {
+    $('#sheetTitle').textContent = 'Reminders and quiet hours';
+    $('#taskForm').hidden = true;
+    $('#presetManager').hidden = true;
+    $('#settingsPanel').hidden = false;
+    $('#sheetBackdrop').hidden = false;
+    $('#taskSheet').hidden = false;
+    updateReminderSettingsUI();
+  }
+
+  async function setRemindersEnabled(enabled) {
+    if (!enabled) {
+      reminderSettings.remindersEnabled = false;
+      saveReminderSettings();
+      updateReminderSettingsUI();
+      return;
+    }
+    if (!('Notification' in window) || !('serviceWorker' in navigator)) {
+      reminderSettings.remindersEnabled = false;
+      updateReminderSettingsUI();
+      showToast('Notifications are not supported in this browser.');
+      return;
+    }
+    let permission = Notification.permission;
+    try {
+      if (permission === 'default') permission = await Notification.requestPermission();
+    } catch { permission = 'denied'; }
+    if (permission !== 'granted') {
+      reminderSettings.remindersEnabled = false;
+      saveReminderSettings();
+      updateReminderSettingsUI();
+      showToast('Allow notifications in browser settings to use reminders.');
+      return;
+    }
+    reminderSettings.remindersEnabled = true;
+    saveReminderSettings();
+    updateReminderSettingsUI();
+    showToast('Task reminders are on.');
+    checkTaskReminders();
+  }
+
+  function saveQuietHoursFromControls() {
+    reminderSettings.quietHoursEnabled = $('#quietHoursToggle').checked;
+    reminderSettings.quietStart = $('#quietStart').value || '22:00';
+    reminderSettings.quietEnd = $('#quietEnd').value || '07:00';
+    saveReminderSettings();
+    $('#quietHoursFields').hidden = !reminderSettings.quietHoursEnabled;
   }
 
   function toggleTask(id) {
@@ -425,8 +605,10 @@
 
   function openSheet() {
     $('#taskDate').value = currentView === 'upcoming' ? nextDateKey() : todayKey;
+    $('#sheetTitle').textContent = 'Add something to your day';
     $('#taskForm').hidden = false;
     $('#presetManager').hidden = true;
+    $('#settingsPanel').hidden = true;
     $('#sheetBackdrop').hidden = false;
     $('#taskSheet').hidden = false;
     setTimeout(() => $('#taskTitle').focus(), 40);
@@ -437,6 +619,8 @@
     $('#taskSheet').hidden = true;
     $('#taskForm').hidden = false;
     $('#presetManager').hidden = true;
+    $('#settingsPanel').hidden = true;
+    $('#sheetTitle').textContent = 'Add something to your day';
     $('#taskForm').reset();
     $('#taskDate').value = todayKey;
   }
@@ -452,6 +636,10 @@
     $('#presetEditor').lastElementChild?.querySelector('input')?.focus();
   });
   $('#savePresets').addEventListener('click', () => closePresetEditor(true));
+  $('#remindersToggle').addEventListener('change', (event) => setRemindersEnabled(event.currentTarget.checked));
+  $('#quietHoursToggle').addEventListener('change', saveQuietHoursFromControls);
+  $('#quietStart').addEventListener('change', saveQuietHoursFromControls);
+  $('#quietEnd').addEventListener('change', saveQuietHoursFromControls);
 
   $('#taskForm').addEventListener('submit', (event) => {
     event.preventDefault();
@@ -491,9 +679,7 @@
     render();
     showToast(sortByTime ? 'Timed tasks come first.' : 'Showing tasks in the order added.');
   });
-  $('#moreButton').addEventListener('click', () =>
-    showToast('Your tasks are saved on this device.')
-  );
+  $('#moreButton').addEventListener('click', openSettings);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !$('#taskSheet').hidden) closeSheet();
   });
@@ -523,4 +709,12 @@
 
   renderPresetChips();
   render();
+  updateReminderSettingsUI();
+  checkTaskReminders();
+  window.setInterval(checkTaskReminders, 15000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) checkTaskReminders();
+  });
+  window.addEventListener('focus', checkTaskReminders);
 })();
+
