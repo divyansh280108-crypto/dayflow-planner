@@ -29,4 +29,3 @@ This is a web app installed from a website, not a Play Store listing or a standa
 - \`service-worker.js\`: offline app shell
 - \`icons/\`: app icons
 
-

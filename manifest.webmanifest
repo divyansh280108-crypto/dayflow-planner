@@ -1,0 +1,6 @@
+{
+"name":"Dayflow — Daily Planner","short_name":"Dayflow","id":"./","description":"A calmer, friendlier way to plan your day.",
+"start_url":"./index.html","scope":"./","display":"standalone","orientation":"portrait",
+"background_color":"#f7f8f5","theme_color":"#f7f8f5",
+"icons":[{"src":"./icons/dayflow-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"./icons/dayflow-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"},{"src":"./icons/dayflow.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]
+}
