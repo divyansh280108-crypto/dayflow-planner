@@ -1,8 +1,8 @@
-const CACHE_NAME = 'dayflow-v4';
+const CACHE_NAME = 'dayflow-v5';
 const APP_FILES = [
   './',
   './index.html',
-  './styles.css',
+  './styles.css?v=3',
   './app.js?v=3',
   './manifest.webmanifest',
   './icons/dayflow.svg',
